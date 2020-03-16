@@ -52,6 +52,12 @@ impl<T> WakeOnWrite<T> {
     pub fn waker(wow: &Self) -> Option<&Waker> {
         wow.waker.as_ref()
     }
+
+    /// Wakes the currently registered `Waker`, if there is one, returning
+    /// `Some(())` if it was woken and `None` otherwise.
+    pub fn wake(wow: &Self) -> Option<()> {
+        wow.waker.as_ref().map(|w| w.wake_by_ref())
+    }
 }
 
 impl<T> Deref for WakeOnWrite<T> {
@@ -105,6 +111,63 @@ async fn wow_wakes_target_on_mut_access() {
             for _ in 0..10u8 {
                 let mut lock = data_ref.lock().await;
                 **lock += 1;
+            }
+        }
+    };
+
+    data_checker
+        .join(data_incrementor)
+        .timeout(core::time::Duration::new(1, 0))
+        .await
+        .unwrap();
+}
+
+#[async_std::test]
+async fn wow_wakes_target_on_explicit_wake() {
+    use async_std::future::poll_fn;
+    use async_std::prelude::*;
+    use async_std::sync::Arc;
+    use async_std::sync::Mutex;
+    use async_std::task::Poll;
+    use pin_utils::pin_mut;
+    use std::future::Future;
+
+    let data: Arc<Mutex<WakeOnWrite<u8>>> = Default::default();
+    let data_checker = {
+        let data_ref = data.clone();
+        poll_fn(move |ctx| {
+            // This is an inefficient use of futures, but it does work in this
+            // case.
+            let data_lock_future = data_ref.lock();
+            pin_mut!(data_lock_future);
+            match data_lock_future.poll(ctx) {
+                Poll::Ready(mut lock) => match **lock {
+                    10 => Poll::Ready(()),
+                    _ => {
+                        WakeOnWrite::set_waker(&mut lock, ctx.waker().clone());
+                        Poll::Pending
+                    }
+                },
+                Poll::Pending => Poll::Pending,
+            }
+        })
+    };
+
+    let data_incrementor = {
+        let data_ref = data.clone();
+        async move {
+            for _ in 0..10u8 {
+                let mut lock = data_ref.lock().await;
+                // Remove the Waker before mutable access, then put it back, so
+                // we have to wake the task manually.
+                let waker = WakeOnWrite::take_waker(&mut *lock);
+                **lock += 1;
+                // If there was a Waker, put it back.
+                if let Some(w) = waker {
+                    WakeOnWrite::set_waker(&mut *lock, w);
+                }
+                // Now, manually wake the Waker.
+                WakeOnWrite::wake(&*lock);
             }
         }
     };
