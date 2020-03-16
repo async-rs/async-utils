@@ -16,5 +16,8 @@ authors = [
 [features]
 
 [dependencies]
+async-std = "1"
 
 [dev-dependencies]
+async-std = { version = "1", features = ["attributes", "unstable"] }
+pin-utils = "0.1.0-alpha.4"
